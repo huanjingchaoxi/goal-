@@ -33,9 +33,22 @@
 | 2 | 异常事件流模拟器 | ✅ | `simulator/event_stream.jsonl` | 411事件/20.2%触发率/5类事件 |
 | 3 | 知识库底座 | ✅ | `knowledge_base/` (109 chunks + FAISS) | 检索命中 VB 判据 |
 | 4 | 四Agent链 | ✅ | `agents/` | 完整链路验证通过（含RAG证据+幻觉防御） |
-| 5 | LangGraph编排 | ⏳ 全量批处理 | `agents/workflow.py` | 单事件通过，411 事件批处理中 |
+| 5 | LangGraph编排 | ✅ | `agents/workflow.py` + `output/pipeline_results.json` | **411 事件全部处理**，零崩溃 |
 | 6 | Streamlit UI | ✅ | `ui/app.py` | 启动成功 + AppTest 0异常 |
-| 7 | 审计日志+幻觉防御 | ✅ | `logs/audit.jsonl` | 194+ 条，含哈希 |
+| 7 | 审计日志+幻觉防御 | ✅ | `logs/audit.jsonl` | 含哈希，全节点落盘 |
+
+## 二·五、全量批处理结果（最终验收数据）
+
+```
+events_processed      411
+screening_pass        151        （260 被过滤：误报 189 + 低置信度/低严重度 71）
+diagnosed             151
+work_orders           151        （45 需人工审批 / 106 自动批准）
+knowledge_entries     151        （全部回写知识库）
+elapsed               643.6s     （DeepSeek 逐事件诊断）
+知识库 chunks          109 → 411  （知识沉淀闭环生效）
+幻觉防御               0 条证据被剔除（证据 source 均来自检索结果）
+```
 
 ---
 
@@ -55,7 +68,13 @@
 - **Step6** Streamlit UI：修复 `run_one` 作用域 bug，AppTest 0 异常，标题/三栏/Agent面板正常渲染
 - **Step7** 审计日志：screening/diagnosis/dispatch/approval/knowledge 全节点落盘，含 input_hash + latency
 
-### 2026-08-05 · Step5 全量批处理
-- ⏳ 411 事件全量跑批（DeepSeek 逐事件诊断，预计数分钟）
+### 2026-08-05 · Step5 全量批处理 ✅
+- 411 事件全部处理完成，零崩溃
+- 修复 2 个 bug：LLM 返回 null 时 dispatch 比较崩溃 → 防御性类型检查；汇总统计 None 聚合崩溃 → 用 `(x or {})` 兜底
+- 结果保存 `output/pipeline_results.json` + `pipeline_summary.json`
+
+### 2026-08-05 · 上传 GitHub
+- 远程：`huanjingchaoxi/goal-`，分支 `lai` 已推送（47 文件，仅 goai_system 框架，17GB 原始数据已忽略）
+- 使用父级仓库方案，`.gitignore` 只放行 `goai_system/`
 
 ---
