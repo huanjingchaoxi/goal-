@@ -1,0 +1,11 @@
+# GOAI 智能运维系统 - 依赖清单
+# 运行环境: conda env langgraph_env (Python 3.10)
+numpy
+pandas
+scipy
+scikit-learn
+matplotlib
+streamlit
+faiss-cpu
+langgraph
+requests

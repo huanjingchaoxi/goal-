@@ -1,0 +1,62 @@
+[
+  {
+    "id": "FMEA-01",
+    "failure_mode": "后刀面磨损 (flank wear)",
+    "effect": "加工表面粗糙度恶化、尺寸超差、切削力上升",
+    "severity": 6,
+    "cause": "长时间切削、切削速度过高、冷却不足",
+    "occurrence": 7,
+    "detection": "振动RMS抬升、切削力上升、声发射RMS升高",
+    "detection_method": "在线信号监测 + 显微镜抽检",
+    "rpn": 252,
+    "recommended_action": "VB达0.3mm前换刀；降低切削速度；加强冷却"
+  },
+  {
+    "id": "FMEA-02",
+    "failure_mode": "崩刃 (chipping)",
+    "effect": "刃口缺口、表面缺陷、突发振动尖峰",
+    "severity": 8,
+    "cause": "冲击载荷、振动、断续切削、涂层脱落",
+    "occurrence": 5,
+    "detection": "声发射峭度突变>3.5、振动瞬时尖峰",
+    "detection_method": "声发射监测 + 振动峭度",
+    "rpn": 320,
+    "recommended_action": "更换刀片；检查装夹刚性；优化切入角"
+  },
+  {
+    "id": "FMEA-03",
+    "failure_mode": "破裂 (fracture)",
+    "effect": "刀具整体断裂、工件报废、设备损坏风险",
+    "severity": 10,
+    "cause": "过载、热裂纹、材料缺陷、磨损过度后继续加工",
+    "occurrence": 3,
+    "detection": "切削力突变、振动剧烈、AE大幅冲击",
+    "detection_method": "多通道异常联动报警",
+    "rpn": 300,
+    "recommended_action": "立即停机换刀；设置过载保护；预防性更换"
+  },
+  {
+    "id": "FMEA-04",
+    "failure_mode": "积屑瘤 (built-up edge)",
+    "effect": "表面粗糙度恶化、切削力波动、尺寸不稳定",
+    "severity": 5,
+    "cause": "低速切削、工件材料粘性、缺乏冷却",
+    "occurrence": 4,
+    "detection": "切削力高频波动、表面质量检查",
+    "detection_method": "切削力波动分析",
+    "rpn": 80,
+    "recommended_action": "提高切削速度；改善冷却；选用涂层刀片"
+  },
+  {
+    "id": "FMEA-05",
+    "failure_mode": "月牙洼磨损 (crater wear)",
+    "effect": "刃口强度下降、继而崩刃或破裂",
+    "severity": 7,
+    "cause": "高温、切屑摩擦、扩散磨损",
+    "occurrence": 6,
+    "detection": "前刀面磨损难在线监测，通过后刀面磨损推断",
+    "detection_method": "定期检查 + 刀具寿命统计",
+    "rpn": 252,
+    "recommended_action": "控制切削温度；选用耐热涂层；定期换刀"
+  }
+]

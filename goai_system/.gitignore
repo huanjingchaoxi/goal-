@@ -1,0 +1,19 @@
+# ===== GOAI 系统 Git 忽略规则 =====
+
+# 原始数据（17.44 GB，禁止上传）
+data/raw/
+
+# 运行时产物（可再生成）
+logs/
+output/
+__pycache__/
+*.pyc
+*.pyo
+
+# 环境 / 密钥
+.env
+*.local
+
+# 系统文件
+.DS_Store
+Thumbs.db
