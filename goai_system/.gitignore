@@ -5,7 +5,10 @@ data/raw/
 
 # 运行时产物（可再生成）
 logs/
-output/
+output/*
+!output/demo/
+!output/run_batch_all.py
+!output/generate_demo_materials.py
 __pycache__/
 *.pyc
 *.pyo

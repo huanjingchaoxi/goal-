@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8">
+<title>刀锋智维 · GOAI Demo 报告</title>
+<style>
+body { font-family: "Microsoft YaHei", sans-serif; max-width: 960px; margin: 24px auto; padding: 0 16px; color: #222; }
+h1 { color: #1565c0; } h2 { color: #333; border-bottom: 2px solid #e0e0e0; padding-bottom: 6px; }
+.card { border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px 16px; margin: 10px 0; }
+.ev { font-weight: bold; color: #d32f2f; } .diag { margin-top: 6px; } .wo { margin-top: 4px; color: #555; }
+.stats { display: flex; gap: 12px; flex-wrap: wrap; }
+.stat { background: #f5f5f5; border-radius: 8px; padding: 12px 18px; }
+.stat b { font-size: 22px; color: #1565c0; display: block; }
+img { max-width: 100%; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+.fig { margin: 18px 0; }
+</style></head><body>
+<h1>🛠 刀锋智维 · 数控刀具多智能体运维系统</h1>
+<p>GOAI 无界应用大赛 · AI+工业制造赛道 — 异常发现 → 故障诊断 → 维修调度 → 知识沉淀</p>
+
+<h2>一、系统总览（全量批处理结果）</h2>
+<div class="stats">
+  <div class="stat"><b>411</b>事件处理</div>
+  <div class="stat"><b>151</b>通过研判</div>
+  <div class="stat"><b>151</b>故障诊断</div>
+  <div class="stat"><b>151</b>维修工单</div>
+  <div class="stat"><b>151</b>知识沉淀</div>
+</div>
+
+<h2>二、关键图表</h2>
+<div class="fig"><img src="wear_curves.png" alt="磨损曲线"></div>
+<div class="fig"><img src="event_dist.png" alt="事件分布"></div>
+<div class="fig"><img src="pipeline_summary.png" alt="流水线汇总"></div>
+
+<h2>三、诊断样例</h2>
+<div class="card">
+            <div class="ev"><b>force_trend_anomaly</b> · c1 cut145 · 置信度 0.7</div>
+            <div class="diag">🩺 <i>刀具磨损接近精加工极限，建议立即停机进行显微镜VB测量，并根据测量结果决定是否更换刀具。</i>（置信度 0.7，RUL 0.0h）</div>
+            <div class="wo">📋 风险 low / auto_approved</div></div><div class="card">
+            <div class="ev"><b>force_trend_anomaly</b> · c1 cut187 · 置信度 0.7</div>
+            <div class="diag">🩺 <i>刀具磨损接近精加工极限，建议立即停机进行显微镜VB测量。</i>（置信度 0.7，RUL 0.0h）</div>
+            <div class="wo">📋 风险 low / auto_approved</div></div><div class="card">
+            <div class="ev"><b>force_trend_anomaly</b> · c1 cut222 · 置信度 0.7</div>
+            <div class="diag">🩺 <i>刀具磨损接近精加工极限，建议立即停机进行显微镜VB测量，并根据测量结果决定是否更换刀具。</i>（置信度 0.7，RUL 0.0h）</div>
+            <div class="wo">📋 风险 low / auto_approved</div></div><div class="card">
+            <div class="ev"><b>ae_impact</b> · c1 cut286 · 置信度 0.92</div>
+            <div class="diag">🩺 <i>证据不足，无法确定刀具磨损状态。异常事件显示AE冲击，但知识库中无直接相关标准。</i>（置信度 0.5，RUL Noneh）</div>
+            <div class="wo">📋 风险 low / auto_approved</div></div><div class="card">
+            <div class="ev"><b>vibration_drift</b> · c1 cut289 · 置信度 0.87</div>
+            <div class="diag">🩺 <i>证据不足</i>（置信度 0.0，RUL Noneh）</div>
+            <div class="wo">📋 风险 low / auto_approved</div></div>
+
+<h2>四、审计日志（防篡改）</h2>
+<p>每个 Agent 节点记录 <code>timestamp / input_hash(SHA256) / output / latency_ms</code>，见 <code>logs/audit.jsonl</code>。</p>
+</body></html>
