@@ -9,6 +9,7 @@ Step 4.2: 故障诊断 Agent（带 RAG + 幻觉防御）
 """
 import json
 from datetime import datetime, timezone
+from agents.text_utils import normalize_llm_text
 
 
 class FaultDiagnosisAgent:
@@ -50,7 +51,8 @@ class FaultDiagnosisAgent:
             "1. 结论必须基于检索结果中的标准条款\n"
             "2. 每条证据必须标注来源（source 字段，只能取自上述检索结果的 [source] 标记）\n"
             "3. 如果检索结果不足以支撑结论，明确说明'证据不足'\n"
-            "4. 输出严格 JSON 格式，不要输出其他内容\n\n"
+            "4. 输出严格 JSON 格式，不要输出其他内容\n"
+            "5. conclusion 与 recommended_action 使用简洁文本；如需列出操作步骤，只允许单层编号（1. 2. 3.），禁止 1.1、2.1 等多层编号\n\n"
             '输出格式:\n'
             '{"conclusion": "诊断结论", "confidence": 0.0-1.0, '
             '"evidence": [{"type": "signal|standard|case", "desc": "...", "source": "..."}], '
@@ -58,6 +60,13 @@ class FaultDiagnosisAgent:
         )
         report = self.llm.chat_json(prompt, max_tokens=1000)
         if report and isinstance(report, dict) and report.get("conclusion"):
+            # 规范化 LLM 自由文本：消除 1.1. 多层编号、重复标点等
+            report["conclusion"] = normalize_llm_text(report["conclusion"])
+            report["recommended_action"] = normalize_llm_text(
+                report.get("recommended_action", ""))
+            for ev in report.get("evidence", []):
+                if isinstance(ev, dict) and ev.get("desc"):
+                    ev["desc"] = normalize_llm_text(ev["desc"])
             report = self._hallucination_guard(report, retrieved)
             report["diagnosis_id"] = f"diag_{event.get('event_id', 'unknown')}"
             report["event_id"] = event.get("event_id")
