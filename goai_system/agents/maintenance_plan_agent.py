@@ -10,6 +10,7 @@ from typing import Optional, List, Dict, Any
 import json
 import re
 import requests
+from agents.text_utils import normalize_llm_text
 
 # ========== Ollama 客户端（本地 LLM） ==========
 class OllamaClient:
@@ -126,6 +127,8 @@ class MaintenancePlanAgent:
 - 诊断结论: {diagnosis.get('conclusion', '')}
 - 推荐操作: {diagnosis.get('recommended_action', 'inspect')}
 
+要求：steps 中每个步骤用简洁的一句话描述，不要带任何编号前缀（如 1.、1.1.、1.1）。
+
 请按以下 JSON 格式输出（不要输出其他内容）：
 {{
     "steps": ["步骤1", "步骤2", ...],
@@ -149,6 +152,8 @@ class MaintenancePlanAgent:
 - 置信度: {diagnosis.get('confidence', 0.5)}
 - 诊断结论: {diagnosis.get('conclusion', '')}
 - 推荐操作: {diagnosis.get('recommended_action', 'inspect')}
+
+要求：steps 中每个步骤用简洁的一句话描述，不要带任何编号前缀（如 1.、1.1.、1.1）。
 
 请按以下 JSON 格式输出（不要输出其他内容）：
 {{
@@ -317,19 +322,31 @@ class MaintenancePlanAgent:
         }
 
     def _build_response(self, diagnosis: Dict[str, Any], llm_result: Dict[str, Any]) -> Dict[str, Any]:
-        """构建标准响应格式"""
+        """构建标准响应格式（步骤/清单/提示统一规范化，去除 1.1. 等编号前缀）"""
+        def _clean_list(items, fallback):
+            cleaned = [normalize_llm_text(s, mode="plain") for s in items]
+            cleaned = [s for s in cleaned if s]
+            return cleaned or fallback
+
+        steps = _clean_list(
+            llm_result.get("steps", []), ["检查刀具状态", "执行维修操作", "验证修复效果"])
+        tools = _clean_list(llm_result.get("required_tools", []), [])
+        parts = _clean_list(llm_result.get("required_parts", []), [])
+        safety = normalize_llm_text(
+            llm_result.get("safety_notes", "操作前请参考设备操作手册"))
+
         return {
             "plan_id": f"plan_{datetime.now().strftime('%Y%m%d%H%M%S')}",
             "diagnosis_id": diagnosis.get("diagnosis_id", f"diag_{datetime.now().strftime('%Y%m%d%H%M%S')}"),
             "tool_id": diagnosis.get("tool_id", "unknown"),
             "fault_type": diagnosis.get("fault_type", "未知故障"),
             "severity": diagnosis.get("severity", "medium"),
-            "steps": llm_result.get("steps", ["检查刀具状态", "执行维修操作", "验证修复效果"]),
-            "required_tools": llm_result.get("required_tools", []),
-            "required_parts": llm_result.get("required_parts", []),
+            "steps": steps,
+            "required_tools": tools,
+            "required_parts": parts,
             "estimated_time_min": llm_result.get("estimated_time_min", 30),
             "risk_level": llm_result.get("risk_level", "medium"),
-            "safety_notes": llm_result.get("safety_notes", "操作前请参考设备操作手册"),
+            "safety_notes": safety,
             "created_at": datetime.now(timezone.utc).isoformat()
         }
 
