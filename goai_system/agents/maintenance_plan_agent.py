@@ -8,6 +8,44 @@ Step 4.2: 维修方案 Agent
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
+# ========== 知识库模块（懒加载） ==========
+_kb_vectorstore = None
+
+def get_kb_vectorstore():
+    """懒加载知识库"""
+    global _kb_vectorstore
+    if _kb_vectorstore is None:
+        try:
+            from langchain_community.vectorstores import Chroma
+            from langchain_community.embeddings import HuggingFaceEmbeddings
+            import os
+            kb_path = os.path.join(os.path.dirname(__file__), "..", "data", "chroma_db")
+            embeddings = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                model_kwargs={
+                  "device": "cpu",
+                  "local_files_only": True   # 强制使用本地缓存，不联网
+                 },
+                encode_kwargs={"normalize_embeddings": True}
+            )
+            _kb_vectorstore = Chroma(
+                persist_directory=kb_path,
+                embedding_function=embeddings
+            )
+        except Exception as e:
+            print(f"⚠️ 知识库加载失败: {e}")
+            _kb_vectorstore = None
+    return _kb_vectorstore
+
+def search_knowledge(query: str, k: int = 3):
+    """从知识库检索相关片段"""
+    vectorstore = get_kb_vectorstore()
+    if vectorstore is None:
+        return []
+    docs = vectorstore.similarity_search(query, k=k)
+    return [doc.page_content for doc in docs]
+# ========== 知识库模块结束 ==========
+
 
 class MaintenancePlanAgent:
     def __init__(self, llm_client=None):
@@ -16,32 +54,7 @@ class MaintenancePlanAgent:
     def generate_plan(self, diagnosis: Dict[str, Any]) -> Dict[str, Any]:
         """
         根据诊断结果生成维修方案
-
-        Args:
-            diagnosis: 诊断结果字典，包含:
-                - tool_id: 刀具编号
-                - fault_type: 故障类型
-                - confidence: 置信度 (0-1)
-                - severity: 严重程度 (low/medium/high)
-                - diagnosis_id: 诊断ID
-                - event_id: 事件ID
-                - recommended_action: 推荐操作
-                - conclusion: 诊断结论
-
-        Returns:
-            维修方案字典:
-                - plan_id: 方案ID
-                - diagnosis_id: 关联的诊断ID
-                - tool_id: 刀具编号
-                - fault_type: 故障类型
-                - severity: 严重程度
-                - steps: 维修步骤列表
-                - required_tools: 所需工具列表
-                - required_parts: 所需备件列表
-                - estimated_time_min: 预估维修时间(分钟)
-                - risk_level: 风险等级 (low/medium/high)
-                - safety_notes: 安全注意事项
-                - created_at: 创建时间
+        优先级：LLM + 知识库 → 规则引擎
         """
         fault_type = diagnosis.get("fault_type", "未知故障")
         severity = diagnosis.get("severity", "medium")
@@ -49,19 +62,59 @@ class MaintenancePlanAgent:
         conclusion = diagnosis.get("conclusion", "")
         recommended_action = diagnosis.get("recommended_action", "inspect")
 
-        # 尝试用 LLM 生成更详细的方案
-        llm_plan = None
+        # ===== 🆕 新增：先从知识库检索相关内容 =====
+        kb_results = search_knowledge(fault_type, k=2)
+        if kb_results:
+            diagnosis["_kb_context"] = "\n\n".join(kb_results)
+            # 尝试用 LLM + 知识库生成
+            if self.llm and self.llm.available:
+                llm_plan = self._generate_with_llm_and_kb(diagnosis, kb_results)
+                if llm_plan:
+                    return self._build_response(diagnosis, llm_plan)
+
+        # ===== 原有逻辑：直接调用 LLM（不用知识库）=====
         if self.llm and self.llm.available:
             llm_plan = self._generate_with_llm(diagnosis)
+            if llm_plan:
+                return self._build_response(diagnosis, llm_plan)
 
-        if llm_plan:
-            return self._build_response(diagnosis, llm_plan)
-
-        # 规则兜底：根据故障类型和严重程度生成方案
+        # ===== 规则兜底 =====
         return self._generate_by_rules(diagnosis)
 
-    def _generate_with_llm(self, diagnosis: Dict[str, Any]) -> Optional[str]:
-        """调用 LLM 生成维修方案"""
+    # ===== 🆕 新增：基于知识库的 LLM 生成 =====
+    def _generate_with_llm_and_kb(self, diagnosis: Dict[str, Any], kb_results: List[str]) -> Optional[Dict[str, Any]]:
+        """基于知识库检索结果调用 LLM 生成维修方案"""
+        if not self.llm or not self.llm.available:
+            return None
+        
+        context = "\n\n".join(kb_results)
+        prompt = f"""你是一位资深的数控机床维修工程师。请基于以下知识库内容和诊断信息，生成专业的维修方案。
+
+【知识库参考】（来源：Sandvik 铣削技术指南）
+{context}
+
+【诊断信息】
+- 刀具编号: {diagnosis.get('tool_id', '未知')}
+- 故障类型: {diagnosis.get('fault_type', '未知')}
+- 严重程度: {diagnosis.get('severity', 'medium')}
+- 置信度: {diagnosis.get('confidence', 0.5)}
+- 诊断结论: {diagnosis.get('conclusion', '')}
+- 推荐操作: {diagnosis.get('recommended_action', 'inspect')}
+
+请按以下 JSON 格式输出（不要输出其他内容）：
+{{
+    "steps": ["步骤1", "步骤2", ...],
+    "required_tools": ["工具1", "工具2", ...],
+    "required_parts": ["备件1", "备件2", ...],
+    "estimated_time_min": 30,
+    "risk_level": "low/medium/high",
+    "safety_notes": "安全注意事项"
+}}"""
+        return self.llm.chat_json(prompt)
+
+    # ===== 原有方法保持不变 =====
+    def _generate_with_llm(self, diagnosis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """调用 LLM 生成维修方案（无知识库）"""
         prompt = f"""你是一位资深的数控机床维修工程师。请根据以下诊断信息，生成一份专业的维修方案。
 
 【诊断信息】
@@ -90,7 +143,6 @@ class MaintenancePlanAgent:
         tool_id = diagnosis.get("tool_id", "unknown")
         diagnosis_id = diagnosis.get("diagnosis_id", f"diag_{datetime.now().strftime('%Y%m%d%H%M%S')}")
 
-        # 根据故障类型定义维修方案模板
         templates = {
             "刀具磨损": {
                 "steps": [
