@@ -25,6 +25,7 @@ if str(BASE_DIR) not in sys.path:
 from langgraph.graph import StateGraph, END
 
 from agents.llm_client import LLMClient
+from agents.maintenance_plan_agent import MaintenancePlanAgent
 from agents.anomaly_screening_agent import AnomalyScreeningAgent
 from agents.fault_diagnosis_agent import FaultDiagnosisAgent
 from agents.maintenance_dispatch_agent import MaintenanceDispatchAgent
@@ -38,6 +39,7 @@ class AgentState(TypedDict):
     event: dict
     screening_result: Optional[dict]
     diagnosis: Optional[dict]
+    plan_result: Optional[dict]
     work_order: Optional[dict]
     human_approval: Optional[str]
     knowledge_entry: Optional[dict]
@@ -52,6 +54,7 @@ def _make_agents():
     return {
         "screening": AnomalyScreeningAgent(llm),
         "diagnosis": FaultDiagnosisAgent(llm, kb),
+        "plan": MaintenancePlanAgent(llm),
         "dispatch": MaintenanceDispatchAgent(llm),
         "knowledge": KnowledgeUpdateAgent(kb),
         "llm": llm,
@@ -89,6 +92,18 @@ def build_graph():
             latency_ms=(datetime.now() - t0).total_seconds() * 1000))
         state["work_order"] = wo
         state["log"].append({"node": "dispatch", "output": wo})
+        return state
+    
+    def plan_node(state: AgentState):
+        """Step 4.2: 维修方案生成"""
+        t0 = datetime.now()
+        diagnosis = state.get("diagnosis", {})
+        plan_result = agents["plan"].generate_plan(diagnosis)
+        append_audit(build_log_entry(
+          "plan", diagnosis, plan_result,
+           latency_ms=(datetime.now() - t0).total_seconds() * 1000))
+        state["plan_result"] = plan_result
+        state["log"].append({"node": "plan", "output": plan_result})
         return state
 
     def approval_node(state: AgentState):
@@ -131,6 +146,7 @@ def build_graph():
     g = StateGraph(AgentState)
     g.add_node("screening", screening_node)
     g.add_node("diagnosis", diagnosis_node)
+    g.add_node("plan", plan_node)
     g.add_node("dispatch", dispatch_node)
     g.add_node("approval", approval_node)
     g.add_node("knowledge", knowledge_node)
@@ -138,7 +154,8 @@ def build_graph():
     g.set_entry_point("screening")
     g.add_conditional_edges("screening", screening_router, {
         "diagnosis": "diagnosis", "end": END})
-    g.add_edge("diagnosis", "dispatch")
+    g.add_edge("diagnosis", "plan")
+    g.add_edge("plan", "dispatch")
     g.add_conditional_edges("dispatch", dispatch_router, {
         "approval": "approval", "knowledge": "knowledge"})
     g.add_conditional_edges("approval", approval_router, {
@@ -153,6 +170,7 @@ def initial_state(event):
         "event": event,
         "screening_result": None,
         "diagnosis": None,
+        "plan_result": None,
         "work_order": None,
         "human_approval": None,
         "knowledge_entry": None,
