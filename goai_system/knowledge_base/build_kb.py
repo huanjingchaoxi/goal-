@@ -12,6 +12,16 @@ import pickle
 from pathlib import Path
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+def zh_tokenizer(text):
+    """中文分词：优先 jieba，未安装时退回 \w+ 正则。"""
+    try:
+        import jieba
+        return [t for t in jieba.cut(text) if t.strip()]
+    except ImportError:
+        import re
+        return re.findall(r"\w+", text)
+
+
 BASE_DIR = Path(__file__).resolve().parent
 RAW_DOCS_DIR = BASE_DIR / "raw_docs"
 
@@ -41,7 +51,7 @@ def load_documents(raw_docs_dir):
         if not path.is_file():
             continue
         rel = path.relative_to(raw_docs_dir)
-        category = "standard" if rel.parts[0] in ("iso_8688.txt", "iso_3685.txt") else "reference"
+        category = "standard" if rel.parts[0].startswith("iso_") else "reference"
         category = "reference" if path.suffix in (".md",) else category
 
         if path.suffix == ".json":
@@ -76,7 +86,7 @@ def build_kb():
         raise RuntimeError("raw_docs 为空，请先准备文档。")
 
     texts, sources, cats = zip(*docs)
-    vectorizer = TfidfVectorizer(token_pattern=r"\w+", min_df=1, sublinear_tf=True)
+    vectorizer = TfidfVectorizer(tokenizer=zh_tokenizer, min_df=1, sublinear_tf=True)
     vectorizer.fit(texts)
 
     # 写入 chunks.jsonl

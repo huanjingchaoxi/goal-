@@ -12,6 +12,7 @@ Step 3: FAISS/TF-IDF 知识库检索接口封装
 import json
 import pickle
 import hashlib
+import sys
 from pathlib import Path
 import numpy as np
 
@@ -64,6 +65,8 @@ class KnowledgeBase:
     def _load_pickle(path):
         if not Path(path).exists():
             return None
+        if str(BASE_DIR) not in sys.path:
+            sys.path.insert(0, str(BASE_DIR))
         with open(path, "rb") as f:
             return pickle.load(f)
 
