@@ -9,3 +9,9 @@ streamlit
 faiss-cpu
 langgraph
 requests
+# 代码质量与测试依赖
+pytest>=7.0.0
+pytest-cov>=4.0.0
+black>=23.0.0
+isort>=5.12.0
+mypy>=1.0.0
