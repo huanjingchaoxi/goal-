@@ -1,10 +1,10 @@
 """
 Step 5: LangGraph 编排
 ======================
-四 Agent 链: 异常研判 -> 故障诊断(RAG) -> 维修调度 -> 知识沉淀
+五 Agent 链: 异常研判 -> 故障诊断(RAG) -> 维修方案生成 -> 维修调度 -> 知识沉淀
 流程:
   screening --(filter)--> END
-  screening --(pass)----> diagnosis -> dispatch
+  screening --(pass)----> diagnose -> plan -> dispatch
   dispatch --(required_approval)--> approval(模拟人工审批) -> knowledge
   dispatch --(auto_approved)-----> knowledge -> END
 运行:
@@ -38,8 +38,8 @@ KB_BASE = BASE_DIR / "knowledge_base"
 class AgentState(TypedDict):
     event: dict
     screening_result: Optional[dict]
-    diagnosis: Optional[dict]
-    plan_result: Optional[dict]
+    diagnosis: Optional[dict]          # 故障诊断结果
+    plan_result: Optional[dict]         # 维修方案结果（你的 Agent 输出）
     work_order: Optional[dict]
     human_approval: Optional[str]
     knowledge_entry: Optional[dict]
@@ -54,7 +54,7 @@ def _make_agents():
     return {
         "screening": AnomalyScreeningAgent(llm),
         "diagnosis": FaultDiagnosisAgent(llm, kb),
-        "plan": MaintenancePlanAgent(llm),
+        "plan": MaintenancePlanAgent(llm),           # 你的 Agent
         "dispatch": MaintenanceDispatchAgent(llm),
         "knowledge": KnowledgeUpdateAgent(kb),
         "llm": llm,
@@ -84,6 +84,18 @@ def build_graph():
         state["log"].append({"node": "diagnosis", "output": report})
         return state
 
+    def plan_node(state: AgentState):
+        """Step 4.2: 维修方案生成（你的 Agent）"""
+        t0 = datetime.now()
+        diagnosis = state.get("diagnosis", {})
+        plan_result = agents["plan"].generate_plan(diagnosis)
+        append_audit(build_log_entry(
+            "plan", diagnosis, plan_result,
+            latency_ms=(datetime.now() - t0).total_seconds() * 1000))
+        state["plan_result"] = plan_result
+        state["log"].append({"node": "plan", "output": plan_result})
+        return state
+
     def dispatch_node(state: AgentState):
         t0 = datetime.now()
         wo = agents["dispatch"].dispatch(state["diagnosis"])
@@ -92,18 +104,6 @@ def build_graph():
             latency_ms=(datetime.now() - t0).total_seconds() * 1000))
         state["work_order"] = wo
         state["log"].append({"node": "dispatch", "output": wo})
-        return state
-    
-    def plan_node(state: AgentState):
-        """Step 4.2: 维修方案生成"""
-        t0 = datetime.now()
-        diagnosis = state.get("diagnosis", {})
-        plan_result = agents["plan"].generate_plan(diagnosis)
-        append_audit(build_log_entry(
-          "plan", diagnosis, plan_result,
-           latency_ms=(datetime.now() - t0).total_seconds() * 1000))
-        state["plan_result"] = plan_result
-        state["log"].append({"node": "plan", "output": plan_result})
         return state
 
     def approval_node(state: AgentState):
@@ -128,10 +128,11 @@ def build_graph():
         state["log"].append({"node": "knowledge", "output": kn})
         return state
 
-    def screening_router(state: AgentState) -> Literal["diagnosis", "end"]:
+    # ---------- 路由函数 ----------
+    def screening_router(state: AgentState) -> Literal["diagnose", "end"]:
         if state["screening_result"]["decision"] == "filter":
             return "end"
-        return "diagnosis"
+        return "diagnose"      # 指向诊断节点
 
     def dispatch_router(state: AgentState) -> Literal["approval", "knowledge"]:
         if state["work_order"]["required_approval"]:
@@ -143,23 +144,30 @@ def build_graph():
             return "knowledge"
         return "end"
 
+    # ---------- 构建图 ----------
     g = StateGraph(AgentState)
     g.add_node("screening", screening_node)
-    g.add_node("diagnosis", diagnosis_node)
-    g.add_node("plan", plan_node)
+    g.add_node("diagnose", diagnosis_node)      # 节点名改为 "diagnose"
+    g.add_node("plan", plan_node)               # 节点名改为 "plan"
     g.add_node("dispatch", dispatch_node)
     g.add_node("approval", approval_node)
     g.add_node("knowledge", knowledge_node)
 
     g.set_entry_point("screening")
     g.add_conditional_edges("screening", screening_router, {
-        "diagnosis": "diagnosis", "end": END})
-    g.add_edge("diagnosis", "plan")
+        "diagnose": "diagnose",
+        "end": END
+    })
+    g.add_edge("diagnose", "plan")
     g.add_edge("plan", "dispatch")
     g.add_conditional_edges("dispatch", dispatch_router, {
-        "approval": "approval", "knowledge": "knowledge"})
+        "approval": "approval",
+        "knowledge": "knowledge"
+    })
     g.add_conditional_edges("approval", approval_router, {
-        "knowledge": "knowledge", "end": END})
+        "knowledge": "knowledge",
+        "end": END
+    })
     g.add_edge("knowledge", END)
 
     return g.compile(), agents
@@ -170,7 +178,7 @@ def initial_state(event):
         "event": event,
         "screening_result": None,
         "diagnosis": None,
-        "plan_result": None,
+        "plan_result": None,      # 补充 plan_result
         "work_order": None,
         "human_approval": None,
         "knowledge_entry": None,
@@ -209,7 +217,7 @@ def run_batch(events=None, max_events=None):
 if __name__ == "__main__":
     import sys
     sys.path.insert(0, str(BASE_DIR))
-    print("构建 LangGraph 工作流...")
+    print("构建 LangGraph 工作流（五 Agent 链）...")
     app, agents = build_graph()
     print(f"LLM 可用: {agents['llm'].available}, 模型: {agents['llm'].model}")
 
@@ -225,6 +233,9 @@ if __name__ == "__main__":
             if res.get("diagnosis"):
                 print(f"  诊断: {res['diagnosis']['conclusion']} "
                       f"(置信度 {res['diagnosis'].get('confidence')})")
+            if res.get("plan_result"):
+                plan = res["plan_result"]
+                print(f"  维修方案: {plan.get('plan_id')} 风险={plan.get('risk_level')} 步骤数={len(plan.get('steps', []))}")
             if res.get("work_order"):
                 wo = res["work_order"]
                 print(f"  工单: {wo['work_order_id']} 风险={wo['risk_level']} "
