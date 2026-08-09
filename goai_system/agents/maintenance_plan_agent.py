@@ -3,6 +3,11 @@ Step 4.2: 维修方案 Agent
 ========================
 职责: 根据故障诊断结果，生成具体的维修操作步骤、所需工具、备件清单及风险提示
 输出: 维修方案（符合数据契约 4.2）
+
+增强功能:
+  - 混合检索 (Hybrid Search): BM25关键词检索 + 向量语义检索，加权融合
+  - 三级智能降级: 知识库+LLM → 纯LLM → 规则引擎
+  - Ollama 本地大模型支持
 """
 
 from datetime import datetime, timezone
@@ -10,7 +15,9 @@ from typing import Optional, List, Dict, Any
 import json
 import re
 import requests
-from agents.text_utils import normalize_llm_text
+import jieba
+from rank_bm25 import BM25Okapi
+from functools import lru_cache
 
 # ========== Ollama 客户端（本地 LLM） ==========
 class OllamaClient:
@@ -37,11 +44,15 @@ class OllamaClient:
                 return json.loads(match.group())
             raise ValueError("无法解析 LLM 返回的 JSON")
 
-# ========== 知识库模块（懒加载） ==========
+
+# ========== 知识库模块（混合检索） ==========
 _kb_vectorstore = None
+_bm25_index = None
+_corpus_chunks = []
+_chunk_metadata = []
 
 def get_kb_vectorstore():
-    """懒加载知识库"""
+    """懒加载向量知识库"""
     global _kb_vectorstore
     if _kb_vectorstore is None:
         try:
@@ -58,21 +69,165 @@ def get_kb_vectorstore():
                 persist_directory=kb_path,
                 embedding_function=embeddings
             )
+            print("✅ 向量知识库加载成功")
         except Exception as e:
-            print(f"⚠️ 知识库加载失败: {e}")
+            print(f"⚠️ 向量知识库加载失败: {e}")
             _kb_vectorstore = None
     return _kb_vectorstore
 
-def search_knowledge(query: str, k: int = 3):
-    """从知识库检索相关片段"""
+
+def get_bm25_index():
+    """
+    懒加载 BM25 关键词索引
+    从知识库原始文档（chunks.jsonl）构建分词索引
+    """
+    global _bm25_index, _corpus_chunks, _chunk_metadata
+    if _bm25_index is not None:
+        return _bm25_index
+
+    try:
+        import os
+        import json
+        chunks_path = os.path.join(os.path.dirname(__file__), "..", "knowledge_base", "chunks.jsonl")
+        
+        if not os.path.exists(chunks_path):
+            print(f"⚠️ chunks.jsonl 不存在: {chunks_path}")
+            return None
+        
+        with open(chunks_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        texts = []
+        metadatas = []
+        for line in lines:
+            data = json.loads(line)
+            texts.append(data.get('text', ''))
+            metadatas.append(data.get('metadata', {}))
+        
+        if not texts:
+            print("⚠️ chunks.jsonl 为空")
+            return None
+        
+        # 中文分词（使用 jieba）
+        tokenized_corpus = [list(jieba.cut(t)) for t in texts]
+        _bm25_index = BM25Okapi(tokenized_corpus)
+        _corpus_chunks = texts
+        _chunk_metadata = metadatas
+        print(f"✅ BM25 索引构建完成，共 {len(texts)} 个文本块")
+        return _bm25_index
+    except Exception as e:
+        print(f"⚠️ BM25 索引构建失败: {e}")
+        return None
+
+
+def search_knowledge(query: str, k: int = 3, alpha: float = 0.5):
+    """
+    混合检索：向量语义检索 + BM25 关键词检索，加权融合
+    
+    Args:
+        query: 查询文本（如 "后刀面磨损 切削速度"）
+        k: 返回结果数量
+        alpha: 向量检索权重 (0-1)，1-alpha 为 BM25 权重
+              推荐值：0.4-0.6，平衡语义理解与精确匹配
+    
+    Returns:
+        List[Dict]: [{"content": str, "score": float, "metadata": dict}, ...]
+    """
+    # 1. 向量检索（语义）
     vectorstore = get_kb_vectorstore()
-    if vectorstore is None:
-        return []
-    docs = vectorstore.similarity_search(query, k=k)
-    return [doc.page_content for doc in docs]
-# ========== 知识库模块结束 ==========
+    vector_results = []
+    if vectorstore:
+        try:
+            docs = vectorstore.similarity_search(query, k=k*2)
+            for i, doc in enumerate(docs):
+                score = 1.0 - (i / (len(docs) * 2))  # 归一化分数
+                vector_results.append({
+                    "content": doc.page_content,
+                    "metadata": doc.metadata,
+                    "score": score,
+                    "type": "vector"
+                })
+        except Exception as e:
+            print(f"⚠️ 向量检索失败: {e}")
+    
+    # 2. BM25 关键词检索
+    bm25_results = []
+    bm25 = get_bm25_index()
+    if bm25 and _corpus_chunks:
+        try:
+            tokenized_query = list(jieba.cut(query))
+            scores = bm25.get_scores(tokenized_query)
+            # 取 top-k*2，过滤零分
+            top_indices = sorted(
+                range(len(scores)), 
+                key=lambda i: scores[i], 
+                reverse=True
+            )[:k*2]
+            for idx in top_indices:
+                if scores[idx] > 0:
+                    bm25_results.append({
+                        "content": _corpus_chunks[idx],
+                        "metadata": _chunk_metadata[idx] if idx < len(_chunk_metadata) else {},
+                        "score": scores[idx],
+                        "type": "bm25"
+                    })
+        except Exception as e:
+            print(f"⚠️ BM25 检索失败: {e}")
+    
+    # 3. 分数归一化 + 加权融合
+    combined = {}  # key: content, value: (final_score, metadata)
+    
+    # 向量分数归一化（max=1.0）
+    if vector_results:
+        max_v_score = max(r["score"] for r in vector_results)
+        for r in vector_results:
+            norm_score = r["score"] / max_v_score if max_v_score > 0 else 0
+            content = r["content"]
+            if content in combined:
+                score, meta = combined[content]
+                combined[content] = (score + alpha * norm_score, meta)
+            else:
+                combined[content] = (alpha * norm_score, r["metadata"])
+    
+    # BM25 分数归一化（max=1.0）
+    if bm25_results:
+        max_b_score = max(r["score"] for r in bm25_results)
+        for r in bm25_results:
+            norm_score = r["score"] / max_b_score if max_b_score > 0 else 0
+            content = r["content"]
+            beta = 1 - alpha  # BM25 权重
+            if content in combined:
+                score, meta = combined[content]
+                combined[content] = (score + beta * norm_score, meta)
+            else:
+                combined[content] = (beta * norm_score, r["metadata"])
+    
+    # 4. 排序取 top-k
+    sorted_items = sorted(
+        combined.items(), 
+        key=lambda x: x[1][0], 
+        reverse=True
+    )[:k]
+    
+    results = [
+        {"content": content, "score": round(score, 4), "metadata": meta}
+        for content, (score, meta) in sorted_items
+    ]
+    
+    # 5. 如果结果为空，降级到纯向量检索
+    if not results and vectorstore:
+        docs = vectorstore.similarity_search(query, k=k)
+        results = [
+            {"content": d.page_content, "score": None, "metadata": d.metadata}
+            for d in docs
+        ]
+        print("⚠️ 混合检索无结果，降级到纯向量检索")
+    
+    print(f"🔍 混合检索完成: 返回 {len(results)} 个结果 (alpha={alpha})")
+    return results
 
 
+# ========== MaintenancePlanAgent 主类 ==========
 class MaintenancePlanAgent:
     def __init__(self, llm_client=None):
         self.llm = llm_client
@@ -80,7 +235,7 @@ class MaintenancePlanAgent:
     def generate_plan(self, diagnosis: Dict[str, Any]) -> Dict[str, Any]:
         """
         根据诊断结果生成维修方案
-        优先级：知识库 + LLM → 纯 LLM → 规则引擎
+        三级智能降级：知识库+LLM → 纯LLM → 规则引擎
         """
         fault_type = diagnosis.get("fault_type", "未知故障")
         severity = diagnosis.get("severity", "medium")
@@ -88,35 +243,33 @@ class MaintenancePlanAgent:
         conclusion = diagnosis.get("conclusion", "")
         recommended_action = diagnosis.get("recommended_action", "inspect")
 
-        # ===== 先从知识库检索相关内容 =====
-        kb_results = search_knowledge(fault_type, k=2)
+        # ===== 第一级：知识库 + LLM（混合检索） =====
+        kb_results = search_knowledge(fault_type, k=3, alpha=0.5)
         if kb_results:
-            diagnosis["_kb_context"] = "\n\n".join(kb_results)
-            # 尝试用 LLM + 知识库生成
+            diagnosis["_kb_context"] = "\n\n".join([r["content"] for r in kb_results])
             if self.llm and self.llm.available:
                 llm_plan = self._generate_with_llm_and_kb(diagnosis, kb_results)
                 if llm_plan:
                     return self._build_response(diagnosis, llm_plan)
 
-        # ===== 直接调用 LLM（不用知识库）=====
+        # ===== 第二级：纯 LLM =====
         if self.llm and self.llm.available:
             llm_plan = self._generate_with_llm(diagnosis)
             if llm_plan:
                 return self._build_response(diagnosis, llm_plan)
 
-        # ===== 规则兜底 =====
+        # ===== 第三级：规则引擎兜底 =====
         return self._generate_by_rules(diagnosis)
 
-    # ===== 基于知识库的 LLM 生成 =====
-    def _generate_with_llm_and_kb(self, diagnosis: Dict[str, Any], kb_results: List[str]) -> Optional[Dict[str, Any]]:
-        """基于知识库检索结果调用 LLM 生成维修方案"""
+    def _generate_with_llm_and_kb(self, diagnosis: Dict[str, Any], kb_results: List[Dict]) -> Optional[Dict[str, Any]]:
+        """基于知识库 + LLM 生成维修方案"""
         if not self.llm or not self.llm.available:
             return None
         
-        context = "\n\n".join(kb_results)
+        context = "\n\n".join([r["content"][:500] for r in kb_results])
         prompt = f"""你是一位资深的数控机床维修工程师。请基于以下知识库内容和诊断信息，生成专业的维修方案。
 
-【知识库参考】（来源：Sandvik 铣削技术指南）
+【知识库参考】（来源：Sandvik 铣削技术指南 / ISO 3685）
 {context}
 
 【诊断信息】
@@ -127,8 +280,6 @@ class MaintenancePlanAgent:
 - 诊断结论: {diagnosis.get('conclusion', '')}
 - 推荐操作: {diagnosis.get('recommended_action', 'inspect')}
 
-要求：steps 中每个步骤用简洁的一句话描述，不要带任何编号前缀（如 1.、1.1.、1.1）。
-
 请按以下 JSON 格式输出（不要输出其他内容）：
 {{
     "steps": ["步骤1", "步骤2", ...],
@@ -140,9 +291,8 @@ class MaintenancePlanAgent:
 }}"""
         return self.llm.chat_json(prompt)
 
-    # ===== 纯 LLM 生成（无知识库） =====
     def _generate_with_llm(self, diagnosis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """调用 LLM 生成维修方案（无知识库）"""
+        """纯 LLM 生成维修方案"""
         prompt = f"""你是一位资深的数控机床维修工程师。请根据以下诊断信息，生成一份专业的维修方案。
 
 【诊断信息】
@@ -153,8 +303,6 @@ class MaintenancePlanAgent:
 - 诊断结论: {diagnosis.get('conclusion', '')}
 - 推荐操作: {diagnosis.get('recommended_action', 'inspect')}
 
-要求：steps 中每个步骤用简洁的一句话描述，不要带任何编号前缀（如 1.、1.1.、1.1）。
-
 请按以下 JSON 格式输出（不要输出其他内容）：
 {{
     "steps": ["步骤1", "步骤2", ...],
@@ -166,16 +314,14 @@ class MaintenancePlanAgent:
 }}"""
         return self.llm.chat_json(prompt)
 
-    # ===== 规则引擎（8 种故障类型） =====
     def _generate_by_rules(self, diagnosis: Dict[str, Any]) -> Dict[str, Any]:
-        """规则兜底：根据故障类型生成方案"""
+        """规则引擎兜底：8种故障类型"""
         fault_type = diagnosis.get("fault_type", "未知故障")
         severity = diagnosis.get("severity", "medium")
         tool_id = diagnosis.get("tool_id", "unknown")
         diagnosis_id = diagnosis.get("diagnosis_id", f"diag_{datetime.now().strftime('%Y%m%d%H%M%S')}")
 
         templates = {
-            # --- 原有 3 种 ---
             "刀具磨损": {
                 "steps": [
                     "停机并拆卸刀具，检查刀片磨损情况",
@@ -218,8 +364,6 @@ class MaintenancePlanAgent:
                 "risk": "low",
                 "safety": "注意切削液飞溅，保持防护门关闭"
             },
-
-            # --- 🆕 新增 5 种 ---
             "积屑瘤": {
                 "steps": [
                     "检查切削区温度，若温度偏低则提高切削速度 (vc)",
@@ -322,31 +466,19 @@ class MaintenancePlanAgent:
         }
 
     def _build_response(self, diagnosis: Dict[str, Any], llm_result: Dict[str, Any]) -> Dict[str, Any]:
-        """构建标准响应格式（步骤/清单/提示统一规范化，去除 1.1. 等编号前缀）"""
-        def _clean_list(items, fallback):
-            cleaned = [normalize_llm_text(s, mode="plain") for s in items]
-            cleaned = [s for s in cleaned if s]
-            return cleaned or fallback
-
-        steps = _clean_list(
-            llm_result.get("steps", []), ["检查刀具状态", "执行维修操作", "验证修复效果"])
-        tools = _clean_list(llm_result.get("required_tools", []), [])
-        parts = _clean_list(llm_result.get("required_parts", []), [])
-        safety = normalize_llm_text(
-            llm_result.get("safety_notes", "操作前请参考设备操作手册"))
-
+        """构建标准响应格式"""
         return {
             "plan_id": f"plan_{datetime.now().strftime('%Y%m%d%H%M%S')}",
             "diagnosis_id": diagnosis.get("diagnosis_id", f"diag_{datetime.now().strftime('%Y%m%d%H%M%S')}"),
             "tool_id": diagnosis.get("tool_id", "unknown"),
             "fault_type": diagnosis.get("fault_type", "未知故障"),
             "severity": diagnosis.get("severity", "medium"),
-            "steps": steps,
-            "required_tools": tools,
-            "required_parts": parts,
+            "steps": llm_result.get("steps", ["检查刀具状态", "执行维修操作", "验证修复效果"]),
+            "required_tools": llm_result.get("required_tools", []),
+            "required_parts": llm_result.get("required_parts", []),
             "estimated_time_min": llm_result.get("estimated_time_min", 30),
             "risk_level": llm_result.get("risk_level", "medium"),
-            "safety_notes": safety,
+            "safety_notes": llm_result.get("safety_notes", "操作前请参考设备操作手册"),
             "created_at": datetime.now(timezone.utc).isoformat()
         }
 
@@ -354,13 +486,11 @@ class MaintenancePlanAgent:
 # ========== 独立测试入口 ==========
 if __name__ == "__main__":
     print("=" * 60)
-    print("测试：维修方案 Agent（规则引擎模式）")
+    print("测试：维修方案 Agent（混合检索 + 规则引擎）")
     print("=" * 60)
 
     agent = MaintenancePlanAgent()
-
-    # 测试所有 8 种故障类型
-    test_faults = ["刀具磨损", "刀具崩刃", "刀具涂层脱落", "积屑瘤", "热裂纹", "缺口磨损", "塑性变形", "月牙洼磨损"]
+    test_faults = ["刀具磨损", "热裂纹", "积屑瘤", "后刀面磨损"]
 
     for ft in test_faults:
         diagnosis = {
@@ -368,8 +498,8 @@ if __name__ == "__main__":
             'severity': 'medium',
             'conclusion': f'测试诊断结论: {ft}'
         }
+        print(f"\n🔍 测试故障类型: {ft}")
         result = agent.generate_plan(diagnosis)
-        print(f"\n【{ft}】")
         print(f"  风险: {result['risk_level']}, 预估时间: {result['estimated_time_min']} 分钟")
-        print(f"  步骤 1: {result['steps'][0]}")
+        print(f"  步骤 1: {result['steps'][0] if result['steps'] else '无'}")
         print(f"  工具: {', '.join(result['required_tools'])}")
