@@ -240,35 +240,219 @@ templates = {
         "safety": "安全提示"
     }
 }
-```
-
-## 12. 其他 Agent 简要说明
-
-## anomaly_screening_agent
-
-- **职责**：对传感器事件进行初步筛选，过滤误报
-- **输入**：事件流中的单条事件
-- **输出**：`{"decision": "pass"}` 或 `{"decision": "filter"}`
-
-## fault_diagnosis_agent
-
-- **职责**：基于 RAG 知识库进行故障诊断
-- **输入**：通过筛选的事件
-- **输出**：诊断报告（含故障类型、置信度、结论）
-
-## maintenance_dispatch_agent
-
-- **职责**：根据维修方案生成派工单
-- **输入**：维修方案
-- **输出**：工单（含优先级、负责部门、状态）
-
-## knowledge_update_agent
-
-- **职责**：将维修案例沉淀到知识库
-- **输入**：工单及反馈
-- **输出**：知识条目 ID
 
 ---
 
-**最后更新**：2026-08-08  
+
+
+## AnomalyScreeningAgent
+
+### 职责
+
+对传感器事件进行初步筛选，过滤误报事件，只将真正异常的事件传递给下游诊断模块。
+
+### 输入格式
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `event` | dict | 完整事件对象（含 `event_id`、`anomaly_type`、`features`） |
+
+### 输出格式
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `decision` | str | `"pass"` 或 `"filter"` |
+| `confidence` | float | 筛选置信度 |
+| `reason` | str | 筛选理由 |
+
+### 工作流程
+
+1. 检查事件是否包含所有必要字段
+2. 根据 `anomaly_type` 和特征值判断是否异常
+3. 返回筛选决策
+
+### 使用示例
+
+```python
+from agents.anomaly_screening_agent import AnomalyScreeningAgent
+
+agent = AnomalyScreeningAgent()
+event = {"event_id": "evt_001", "anomaly_type": "force_trend_anomaly"}
+result = agent.screen(event)
+# {"decision": "pass", "confidence": 0.85, "reason": "..."}
+```
+
+---
+
+## FaultDiagnosisAgent
+
+### 职责
+
+基于 RAG 知识库对异常事件进行故障诊断，输出诊断报告。
+
+### 输入格式
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `event` | dict | 通过筛选的事件对象 |
+
+### 输出格式
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `diagnosis_id` | str | 诊断唯一标识 |
+| `fault_type` | str | 诊断出的故障类型 |
+| `confidence` | float | 置信度 |
+| `severity` | str | 严重程度 |
+| `conclusion` | str | 诊断结论 |
+| `recommended_action` | str | 推荐操作 |
+
+### 工作流程
+
+1. 从事件中提取故障描述
+2. 从知识库检索相关文档（RAG）
+3. 调用 LLM 或规则引擎生成诊断结论
+
+### 使用示例
+
+```python
+from agents.fault_diagnosis_agent import FaultDiagnosisAgent
+
+agent = FaultDiagnosisAgent(llm, kb)
+event = {"event_id": "evt_001", "features": {"Fx": 120.5}}
+report = agent.diagnose(event)
+# {"diagnosis_id": "...", "fault_type": "刀具磨损", ...}
+```
+
+---
+
+## MaintenanceDispatchAgent
+
+### 职责
+
+根据维修方案生成派工单，指派维修人员并跟踪状态。
+
+### 输入格式
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `diagnosis` | dict | 诊断报告（含 `fault_type`、`severity` 等） |
+
+### 输出格式
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `work_order_id` | str | 工单唯一标识 |
+| `assigned_to` | str | 指派人员 |
+| `priority` | str | 优先级 |
+| `status` | str | 当前状态 |
+| `required_approval` | bool | 是否需要审批 |
+
+### 使用示例
+
+```python
+from agents.maintenance_dispatch_agent import MaintenanceDispatchAgent
+
+agent = MaintenanceDispatchAgent()
+diagnosis = {"fault_type": "刀具磨损", "severity": "high"}
+work_order = agent.dispatch(diagnosis)
+# {"work_order_id": "WO_001", "assigned_to": "维修组-张工", ...}
+```
+
+---
+
+## KnowledgeUpdateAgent
+
+### 职责
+
+将维修案例沉淀到知识库，为后续诊断提供经验支撑。
+
+### 输入格式
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `work_order` | dict | 已完成工单 |
+| `human_feedback` | dict | 人工反馈（如效果评估） |
+
+### 输出格式
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `knowledge_id` | str | 知识条目 ID |
+| `fault_type` | str | 故障类型 |
+| `solution` | str | 解决方案摘要 |
+| `effectiveness` | str | 效果评估 |
+
+### 使用示例
+
+```python
+from agents.knowledge_update_agent import KnowledgeUpdateAgent
+
+agent = KnowledgeUpdateAgent(kb)
+work_order = {"fault_type": "刀具磨损"}
+feedback = {"effect": "换刀后恢复正常"}
+entry = agent.update(work_order, feedback)
+# {"knowledge_id": "KB_001", "solution": "...", ...}
+```
+
+---
+
+## LLMClient
+
+### 职责
+
+统一的 LLM 接口，支持多种后端（DeepSeek、Ollama）。
+
+### 接口方法
+
+#### `chat(prompt, max_tokens=1000)`
+
+调用 LLM 进行对话，返回文本响应。
+
+#### `chat_json(prompt, max_tokens=1000)`
+
+调用 LLM 并解析为 JSON 格式。
+
+### 支持的后端
+
+| 后端 | 模型 | 环境要求 |
+|------|------|----------|
+| DeepSeek | `deepseek-chat` | 需要 API Key 和网络 |
+| Ollama | `qwen2.5:7b` | 需要本地安装 Ollama |
+
+### 使用示例
+
+```python
+from agents.llm_client import LLMClient
+from agents.maintenance_plan_agent import OllamaClient
+
+# DeepSeek
+llm = LLMClient()
+response = llm.chat_json("请生成维修方案")
+
+# Ollama
+llm = OllamaClient(model="qwen2.5:7b")
+response = llm.chat_json("请生成维修方案")
+```
+
+---
+
+## 工作流总览
+
+所有 Agent 已通过 LangGraph 集成到 `workflow.py` 中，形成完整的五 Agent 链：
+
+```text
+异常事件 → 异常研判 → 故障诊断 → 维修方案生成 → 工单派发 → 知识沉淀
+             ↑            ↑              ↑              ↑            ↑
+    AnomalyScreening  FaultDiagnosis  MaintenancePlan  Dispatch  KnowledgeUpdate
+```
+
+---
+
+**最后更新**：2026-08-09
+**维护者**：GOAI 无界应用赛道 - 工业制造团队
+```
+
+
+**最后更新**：2026-08-09  
 ```
