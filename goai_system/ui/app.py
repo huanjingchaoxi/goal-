@@ -71,6 +71,21 @@ def main():
             st.plotly_chart(fig, use_container_width=True)
         
         st.divider()
+        # 🆕 缓存统计
+        st.subheader("💾 缓存统计")
+        try:
+            from agents.cache_utils import get_cache_stats
+            stats = get_cache_stats()
+            col1, col2 = st.columns(2)
+            col1.metric("命中率", f"{stats['hit_rate']*100:.1f}%")
+            col2.metric("缓存数", stats['memory_size'])
+            if st.button("清空缓存", key="clear_cache"):
+                from agents.cache_utils import _llm_cache
+                _llm_cache.clear()
+                st.rerun()
+        except Exception as e:
+            st.caption("缓存不可用")
+        st.divider()
         st.caption("审计日志:")
         if st.button("刷新日志"):
             st.cache_data.clear()

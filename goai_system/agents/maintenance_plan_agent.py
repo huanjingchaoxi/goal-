@@ -8,6 +8,7 @@ Step 4.2: 维修方案 Agent
   - 混合检索 (Hybrid Search): BM25关键词检索 + 向量语义检索，加权融合
   - 三级智能降级: 知识库+LLM → 纯LLM → 规则引擎
   - Ollama 本地大模型支持
+  - LLM 调用缓存（减少重复调用）
 """
 
 from datetime import datetime, timezone
@@ -17,7 +18,9 @@ import re
 import requests
 import jieba
 from rank_bm25 import BM25Okapi
-from functools import lru_cache
+
+# ===== 导入缓存工具 =====
+from .cache_utils import cached_llm_call
 
 # ========== Ollama 客户端（本地 LLM） ==========
 class OllamaClient:
@@ -77,10 +80,7 @@ def get_kb_vectorstore():
 
 
 def get_bm25_index():
-    """
-    懒加载 BM25 关键词索引
-    从知识库原始文档（chunks.jsonl）构建分词索引
-    """
+    """懒加载 BM25 关键词索引"""
     global _bm25_index, _corpus_chunks, _chunk_metadata
     if _bm25_index is not None:
         return _bm25_index
@@ -108,7 +108,6 @@ def get_bm25_index():
             print("⚠️ chunks.jsonl 为空")
             return None
         
-        # 中文分词（使用 jieba）
         tokenized_corpus = [list(jieba.cut(t)) for t in texts]
         _bm25_index = BM25Okapi(tokenized_corpus)
         _corpus_chunks = texts
@@ -123,24 +122,14 @@ def get_bm25_index():
 def search_knowledge(query: str, k: int = 3, alpha: float = 0.5):
     """
     混合检索：向量语义检索 + BM25 关键词检索，加权融合
-    
-    Args:
-        query: 查询文本（如 "后刀面磨损 切削速度"）
-        k: 返回结果数量
-        alpha: 向量检索权重 (0-1)，1-alpha 为 BM25 权重
-              推荐值：0.4-0.6，平衡语义理解与精确匹配
-    
-    Returns:
-        List[Dict]: [{"content": str, "score": float, "metadata": dict}, ...]
     """
-    # 1. 向量检索（语义）
     vectorstore = get_kb_vectorstore()
     vector_results = []
     if vectorstore:
         try:
             docs = vectorstore.similarity_search(query, k=k*2)
             for i, doc in enumerate(docs):
-                score = 1.0 - (i / (len(docs) * 2))  # 归一化分数
+                score = 1.0 - (i / (len(docs) * 2))
                 vector_results.append({
                     "content": doc.page_content,
                     "metadata": doc.metadata,
@@ -150,14 +139,12 @@ def search_knowledge(query: str, k: int = 3, alpha: float = 0.5):
         except Exception as e:
             print(f"⚠️ 向量检索失败: {e}")
     
-    # 2. BM25 关键词检索
     bm25_results = []
     bm25 = get_bm25_index()
     if bm25 and _corpus_chunks:
         try:
             tokenized_query = list(jieba.cut(query))
             scores = bm25.get_scores(tokenized_query)
-            # 取 top-k*2，过滤零分
             top_indices = sorted(
                 range(len(scores)), 
                 key=lambda i: scores[i], 
@@ -174,10 +161,7 @@ def search_knowledge(query: str, k: int = 3, alpha: float = 0.5):
         except Exception as e:
             print(f"⚠️ BM25 检索失败: {e}")
     
-    # 3. 分数归一化 + 加权融合
-    combined = {}  # key: content, value: (final_score, metadata)
-    
-    # 向量分数归一化（max=1.0）
+    combined = {}
     if vector_results:
         max_v_score = max(r["score"] for r in vector_results)
         for r in vector_results:
@@ -189,20 +173,18 @@ def search_knowledge(query: str, k: int = 3, alpha: float = 0.5):
             else:
                 combined[content] = (alpha * norm_score, r["metadata"])
     
-    # BM25 分数归一化（max=1.0）
     if bm25_results:
         max_b_score = max(r["score"] for r in bm25_results)
         for r in bm25_results:
             norm_score = r["score"] / max_b_score if max_b_score > 0 else 0
             content = r["content"]
-            beta = 1 - alpha  # BM25 权重
+            beta = 1 - alpha
             if content in combined:
                 score, meta = combined[content]
                 combined[content] = (score + beta * norm_score, meta)
             else:
                 combined[content] = (beta * norm_score, r["metadata"])
     
-    # 4. 排序取 top-k
     sorted_items = sorted(
         combined.items(), 
         key=lambda x: x[1][0], 
@@ -214,7 +196,6 @@ def search_knowledge(query: str, k: int = 3, alpha: float = 0.5):
         for content, (score, meta) in sorted_items
     ]
     
-    # 5. 如果结果为空，降级到纯向量检索
     if not results and vectorstore:
         docs = vectorstore.similarity_search(query, k=k)
         results = [
@@ -233,17 +214,10 @@ class MaintenancePlanAgent:
         self.llm = llm_client
 
     def generate_plan(self, diagnosis: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        根据诊断结果生成维修方案
-        三级智能降级：知识库+LLM → 纯LLM → 规则引擎
-        """
+        """根据诊断结果生成维修方案（三级智能降级）"""
         fault_type = diagnosis.get("fault_type", "未知故障")
         severity = diagnosis.get("severity", "medium")
-        confidence = diagnosis.get("confidence", 0.5)
-        conclusion = diagnosis.get("conclusion", "")
-        recommended_action = diagnosis.get("recommended_action", "inspect")
 
-        # ===== 第一级：知识库 + LLM（混合检索） =====
         kb_results = search_knowledge(fault_type, k=3, alpha=0.5)
         if kb_results:
             diagnosis["_kb_context"] = "\n\n".join([r["content"] for r in kb_results])
@@ -252,17 +226,15 @@ class MaintenancePlanAgent:
                 if llm_plan:
                     return self._build_response(diagnosis, llm_plan)
 
-        # ===== 第二级：纯 LLM =====
         if self.llm and self.llm.available:
             llm_plan = self._generate_with_llm(diagnosis)
             if llm_plan:
                 return self._build_response(diagnosis, llm_plan)
 
-        # ===== 第三级：规则引擎兜底 =====
         return self._generate_by_rules(diagnosis)
 
     def _generate_with_llm_and_kb(self, diagnosis: Dict[str, Any], kb_results: List[Dict]) -> Optional[Dict[str, Any]]:
-        """基于知识库 + LLM 生成维修方案"""
+        """基于知识库 + LLM 生成维修方案（带缓存）"""
         if not self.llm or not self.llm.available:
             return None
         
@@ -289,10 +261,11 @@ class MaintenancePlanAgent:
     "risk_level": "low/medium/high",
     "safety_notes": "安全注意事项"
 }}"""
-        return self.llm.chat_json(prompt)
+        # 🆕 使用缓存调用
+        return cached_llm_call(self.llm, prompt)
 
     def _generate_with_llm(self, diagnosis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """纯 LLM 生成维修方案"""
+        """纯 LLM 生成维修方案（带缓存）"""
         prompt = f"""你是一位资深的数控机床维修工程师。请根据以下诊断信息，生成一份专业的维修方案。
 
 【诊断信息】
@@ -312,7 +285,8 @@ class MaintenancePlanAgent:
     "risk_level": "low/medium/high",
     "safety_notes": "安全注意事项"
 }}"""
-        return self.llm.chat_json(prompt)
+        # 🆕 使用缓存调用
+        return cached_llm_call(self.llm, prompt)
 
     def _generate_by_rules(self, diagnosis: Dict[str, Any]) -> Dict[str, Any]:
         """规则引擎兜底：8种故障类型"""
@@ -486,7 +460,7 @@ class MaintenancePlanAgent:
 # ========== 独立测试入口 ==========
 if __name__ == "__main__":
     print("=" * 60)
-    print("测试：维修方案 Agent（混合检索 + 规则引擎）")
+    print("测试：维修方案 Agent（混合检索 + 缓存 + 规则引擎）")
     print("=" * 60)
 
     agent = MaintenancePlanAgent()
