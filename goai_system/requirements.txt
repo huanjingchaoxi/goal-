@@ -9,4 +9,3 @@ streamlit
 faiss-cpu
 langgraph
 requests
-jieba

@@ -6,7 +6,6 @@ Step 4.4: 知识沉淀 Agent
 """
 import json
 from datetime import datetime, timezone
-from agents.text_utils import normalize_llm_text
 
 
 class KnowledgeUpdateAgent:
@@ -15,12 +14,10 @@ class KnowledgeUpdateAgent:
 
     def update(self, work_order, human_feedback=None):
         diagnosis = work_order.get("diagnosis", {})
-        symptom = normalize_llm_text(
-            work_order.get("symptom") or diagnosis.get("conclusion", "待补充"))
-        root_cause = normalize_llm_text(work_order.get("root_cause", "待补充"))
-        action = normalize_llm_text(work_order.get("action", "inspect"))
-        effect = normalize_llm_text(
-            (human_feedback or {}).get("effect", "待人工补充"))
+        symptom = work_order.get("symptom") or diagnosis.get("conclusion", "待补充")
+        root_cause = work_order.get("root_cause", "待补充")
+        action = work_order.get("action", "inspect")
+        effect = (human_feedback or {}).get("effect", "待人工补充")
 
         entry = {
             "knowledge_id": f"kn_{work_order.get('work_order_id', 'wo_unknown')}",
@@ -34,10 +31,8 @@ class KnowledgeUpdateAgent:
         }
 
         # 回写知识库（增量追加一条 case 知识）
-        def _part(s):
-            return (s or "").strip().rstrip("。")
-        text = (f"故障现象：{_part(symptom)}。根因：{_part(root_cause)}。"
-                f"处置：{_part(action)}。效果：{_part(effect)}。")
+        text = (f"故障现象：{symptom}。根因：{root_cause}。"
+                f"处置：{action}。效果：{effect}。")
         if self.kb is not None:
             try:
                 self.kb.add_knowledge(
