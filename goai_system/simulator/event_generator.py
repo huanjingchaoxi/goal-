@@ -54,8 +54,8 @@ class EventSimulator:
                 "rms_vx_std": group["vx_rms"].std(),
                 "ae_kurtosis_mean": group["ae_rms_kurtosis"].mean(),
                 "ae_kurtosis_std": group["ae_rms_kurtosis"].std(),
-                "fz_mean": group["fz"].mean() if "fz" in group.columns else 0,
-                "fz_std": group["fz"].std() if "fz" in group.columns else 1,
+                "fz_mean": group["fz_mean"].mean() if "fz_mean" in group.columns else 0,
+                "fz_std": group["fz_mean"].std() if "fz_mean" in group.columns else 1,
                 "max_wear": group["vb_mm"].max(),
             }
         return stats
@@ -173,9 +173,9 @@ class EventSimulator:
                     ))
                     emitted = True
 
-                # 7. 刀具崩刃：声发射峭度 > 4.0 + 振动异常（组合特征）
-                if row["ae_rms_kurtosis"] > 4.0 and row["vx_rms"] > stats["rms_vx_mean"] + 1.5 * stats["rms_vx_std"]:
-                    if self.rng.random() < 0.4:
+                # 7. 刀具崩刃：声发射峭度高 + 振动异常（组合特征）
+                if row["ae_rms_kurtosis"] > 3.8 and row["vx_rms"] > stats["rms_vx_mean"] + 1.2 * stats["rms_vx_std"]:
+                    if self.rng.random() < 0.5:
                         events.append(self._emit_event(
                             tool_id, cut_no, "刀具崩刃", "high",
                             {"kurtosis_ae": round(float(row["ae_rms_kurtosis"]), 3), 
@@ -184,21 +184,21 @@ class EventSimulator:
                         emitted = True
 
                 # 8. 积屑瘤：切削力波动 + 中等温度（模拟，基于力特征）
-                if "fz" in row and row["fz"] > stats["fz_mean"] + 1.5 * stats["fz_std"]:
+                if "fz_mean" in row and row["fz_mean"] > stats["fz_mean"] + 1.5 * stats["fz_std"]:
                     if self.rng.random() < 0.3:
                         events.append(self._emit_event(
                             tool_id, cut_no, "积屑瘤", "medium",
-                            {"fz": round(float(row["fz"]), 2)}, 0.75
+                            {"fz_mean": round(float(row["fz_mean"]), 2)}, 0.75
                         ))
                         emitted = True
 
                 # 9. 热裂纹：连续高切削力 + 高振动（模拟）
-                if "fz" in row and row["fz"] > stats["fz_mean"] + 2 * stats["fz_std"]:
-                    if row["vx_rms"] > stats["rms_vx_mean"] + 1.8 * stats["rms_vx_std"]:
+                if "fz_mean" in row and row["fz_mean"] > stats["fz_mean"] + 1.5 * stats["fz_std"]:
+                    if row["vx_rms"] > stats["rms_vx_mean"] + 1.5 * stats["rms_vx_std"]:
                         if self.rng.random() < 0.2:
                             events.append(self._emit_event(
                                 tool_id, cut_no, "热裂纹", "high",
-                                {"fz": round(float(row["fz"]), 2), 
+                                {"fz_mean": round(float(row["fz_mean"]), 2), 
                                  "rms_vx": round(float(row["vx_rms"]), 3)}, 0.82
                             ))
                             emitted = True
@@ -214,12 +214,12 @@ class EventSimulator:
                         emitted = True
 
                 # 11. 塑性变形：高 VB + 高切削力（模拟）
-                if vb_mm >= 0.2 and "fz" in row and row["fz"] > stats["fz_mean"] + 1.8 * stats["fz_std"]:
+                if vb_mm >= 0.2 and "fz_mean" in row and row["fz_mean"] > stats["fz_mean"] + 1.8 * stats["fz_std"]:
                     if self.rng.random() < 0.3:
                         events.append(self._emit_event(
                             tool_id, cut_no, "塑性变形", "medium",
                             {"vb_mm": round(vb_mm, 3), 
-                             "fz": round(float(row["fz"]), 2)}, 0.80
+                             "fz_mean": round(float(row["fz_mean"]), 2)}, 0.80
                         ))
                         emitted = True
 
@@ -230,6 +230,16 @@ class EventSimulator:
                             tool_id, cut_no, "月牙洼磨损", "low",
                             {"vb_mm": round(vb_mm, 3), 
                              "kurtosis_ae": round(float(row["ae_rms_kurtosis"]), 3)}, 0.72
+                        ))
+                        emitted = True
+
+                # 13. 刀具涂层脱落：中等磨损 + 高切削力 + 声发射冲击（模拟）
+                if vb_mm >= 0.15 and "fz_mean" in row and row["fz_mean"] > stats["fz_mean"] + 0.8 * stats["fz_std"]:
+                    if row["ae_rms_kurtosis"] > 2.8 and self.rng.random() < 0.3:
+                        events.append(self._emit_event(
+                            tool_id, cut_no, "刀具涂层脱落", "medium",
+                            {"vb_mm": round(vb_mm, 3),
+                             "fz_mean": round(float(row["fz_mean"]), 2)}, 0.76
                         ))
                         emitted = True
 

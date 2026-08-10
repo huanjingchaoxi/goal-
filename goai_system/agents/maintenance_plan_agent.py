@@ -15,12 +15,28 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import json
 import re
+import sys
 import requests
 import jieba
-from rank_bm25 import BM25Okapi
+from pathlib import Path
 
-# ===== 导入缓存工具 =====
-from .cache_utils import cached_llm_call
+try:
+    from rank_bm25 import BM25Okapi
+    _BM25_AVAILABLE = True
+except ImportError:
+    BM25Okapi = None
+    _BM25_AVAILABLE = False
+    print("⚠️ rank_bm25 未安装，BM25 检索降级为纯向量检索"
+          "（pip install rank-bm25 可启用）")
+
+# 确保 goai_system 在 sys.path（支持从任意目录运行，与 workflow.py 一致）
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+# ===== 导入缓存工具与知识库 =====
+from agents.cache_utils import cached_llm_call
+from knowledge_base.kb import KnowledgeBase
 
 # ========== Ollama 客户端（本地 LLM） ==========
 class OllamaClient:
@@ -36,16 +52,24 @@ class OllamaClient:
             "stream": False,
             "options": {"temperature": 0.3}
         }
-        resp = requests.post(self.base_url, json=payload, timeout=120)
-        resp.raise_for_status()
-        content = resp.json()["message"]["content"]
+        try:
+            resp = requests.post(self.base_url, json=payload, timeout=120)
+            resp.raise_for_status()
+            content = resp.json()["message"]["content"]
+        except Exception as e:
+            print(f"⚠️ [OllamaClient] 调用失败: {e}")
+            return None
         try:
             return json.loads(content)
         except:
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
-                return json.loads(match.group())
-            raise ValueError("无法解析 LLM 返回的 JSON")
+                try:
+                    return json.loads(match.group())
+                except Exception:
+                    pass
+            print("⚠️ [OllamaClient] 无法解析 LLM 返回的 JSON")
+            return None
 
 
 # ========== 知识库模块（混合检索） ==========
@@ -55,26 +79,18 @@ _corpus_chunks = []
 _chunk_metadata = []
 
 def get_kb_vectorstore():
-    """懒加载向量知识库"""
+    """懒加载知识库（TF-IDF + 可选 FAISS，来自 knowledge_base.kb，零额外依赖）"""
     global _kb_vectorstore
     if _kb_vectorstore is None:
         try:
-            from langchain_community.vectorstores import Chroma
-            from langchain_community.embeddings import HuggingFaceEmbeddings
-            import os
-            kb_path = os.path.join(os.path.dirname(__file__), "..", "data", "chroma_db")
-            embeddings = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2",
-                model_kwargs={"device": "cpu"},
-                encode_kwargs={"normalize_embeddings": True}
-            )
-            _kb_vectorstore = Chroma(
-                persist_directory=kb_path,
-                embedding_function=embeddings
-            )
-            print("✅ 向量知识库加载成功")
+            kb = KnowledgeBase()
+            if kb.is_ready():
+                _kb_vectorstore = kb
+                print(f"✅ 知识库加载成功（{kb.count()} chunks, retriever=TF-IDF/FAISS）")
+            else:
+                print("⚠️ 知识库未就绪（缺少 chunks.jsonl 或 vectorizer.pkl）")
         except Exception as e:
-            print(f"⚠️ 向量知识库加载失败: {e}")
+            print(f"⚠️ 知识库加载失败: {e}")
             _kb_vectorstore = None
     return _kb_vectorstore
 
@@ -84,6 +100,8 @@ def get_bm25_index():
     global _bm25_index, _corpus_chunks, _chunk_metadata
     if _bm25_index is not None:
         return _bm25_index
+    if not _BM25_AVAILABLE:
+        return None
 
     try:
         import os
@@ -127,13 +145,15 @@ def search_knowledge(query: str, k: int = 3, alpha: float = 0.5):
     vector_results = []
     if vectorstore:
         try:
-            docs = vectorstore.similarity_search(query, k=k*2)
-            for i, doc in enumerate(docs):
-                score = 1.0 - (i / (len(docs) * 2))
+            docs = vectorstore.retrieve(query, top_k=k * 2)
+            for doc in docs:
                 vector_results.append({
-                    "content": doc.page_content,
-                    "metadata": doc.metadata,
-                    "score": score,
+                    "content": doc.get("text", ""),
+                    "metadata": {
+                        "source": doc.get("source"),
+                        "category": doc.get("category"),
+                    },
+                    "score": doc.get("score") or 0.0,
                     "type": "vector"
                 })
         except Exception as e:
@@ -197,9 +217,13 @@ def search_knowledge(query: str, k: int = 3, alpha: float = 0.5):
     ]
     
     if not results and vectorstore:
-        docs = vectorstore.similarity_search(query, k=k)
+        docs = vectorstore.retrieve(query, top_k=k)
         results = [
-            {"content": d.page_content, "score": None, "metadata": d.metadata}
+            {
+                "content": d.get("text", ""),
+                "score": d.get("score"),
+                "metadata": {"source": d.get("source"), "category": d.get("category")},
+            }
             for d in docs
         ]
         print("⚠️ 混合检索无结果，降级到纯向量检索")
@@ -219,17 +243,21 @@ class MaintenancePlanAgent:
         severity = diagnosis.get("severity", "medium")
 
         kb_results = search_knowledge(fault_type, k=3, alpha=0.5)
-        if kb_results:
-            diagnosis["_kb_context"] = "\n\n".join([r["content"] for r in kb_results])
-            if self.llm and self.llm.available:
+        if kb_results and self.llm and self.llm.available:
+            try:
                 llm_plan = self._generate_with_llm_and_kb(diagnosis, kb_results)
                 if llm_plan:
                     return self._build_response(diagnosis, llm_plan)
+            except Exception as e:
+                print(f"⚠️ LLM(知识库) 生成失败，降级: {e}")
 
         if self.llm and self.llm.available:
-            llm_plan = self._generate_with_llm(diagnosis)
-            if llm_plan:
-                return self._build_response(diagnosis, llm_plan)
+            try:
+                llm_plan = self._generate_with_llm(diagnosis)
+                if llm_plan:
+                    return self._build_response(diagnosis, llm_plan)
+            except Exception as e:
+                print(f"⚠️ LLM 生成失败，降级规则引擎: {e}")
 
         return self._generate_by_rules(diagnosis)
 

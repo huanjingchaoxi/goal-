@@ -13,6 +13,8 @@ Step 5: LangGraph 编排
 """
 import json
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import TypedDict, Optional, Literal
 from pathlib import Path
@@ -42,6 +44,7 @@ class AgentState(TypedDict):
     plan_result: Optional[dict]         # 维修方案结果（你的 Agent 输出）
     work_order: Optional[dict]
     human_approval: Optional[str]
+    human_feedback: Optional[dict]
     knowledge_entry: Optional[dict]
     log: list
 
@@ -120,7 +123,8 @@ def build_graph():
         t0 = datetime.now()
         wo = dict(state["work_order"])
         wo["symptom"] = (state.get("diagnosis") or {}).get("conclusion", "待补充")
-        kn = agents["knowledge"].update(wo, human_feedback={"effect": "换刀后恢复正常"})
+        feedback = state.get("human_feedback") or {"effect": "换刀后恢复正常"}
+        kn = agents["knowledge"].update(wo, human_feedback=feedback)
         append_audit(build_log_entry(
             "knowledge", wo, kn,
             latency_ms=(datetime.now() - t0).total_seconds() * 1000))
@@ -181,15 +185,19 @@ def initial_state(event):
         "plan_result": None,      # 补充 plan_result
         "work_order": None,
         "human_approval": None,
+        "human_feedback": None,
         "knowledge_entry": None,
         "log": [],
     }
 
 
-def run_one(event, app=None):
+def run_one(event, app=None, human_approval=None):
     if app is None:
         app, _ = build_graph()
-    return app.invoke(initial_state(event))
+    state = initial_state(event)
+    if human_approval is not None:
+        state["human_approval"] = human_approval
+    return app.invoke(state)
 
 
 def run_batch(events=None, max_events=None):
@@ -229,27 +237,53 @@ def run_batch_parallel(events, max_workers=4, max_events=None):
     """
     if max_events:
         events = events[:max_events]
-    
+
     app, _ = build_graph()
-    results = []
-    
+    results = [None] * len(events)
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_event = {
-            executor.submit(run_one, ev, app): ev 
-            for ev in events
+        future_to_index = {
+            executor.submit(run_one, ev, app): i
+            for i, ev in enumerate(events)
         }
-        
-        for future in as_completed(future_to_event):
-            ev = future_to_event[future]
+
+        for future in as_completed(future_to_index):
+            i = future_to_index[future]
             try:
                 result = future.result(timeout=120)
                 with _process_lock:
-                    results.append(result)
+                    results[i] = result
             except Exception as e:
-                print(f"[并行] 处理 {ev.get('event_id')} 失败: {e}")
-    
-    return results
+                print(f"[并行] 处理 {events[i].get('event_id')} 失败: {e}")
+
+    # 按原始顺序返回成功结果
+    return [r for r in results if r is not None]
 
 
 if __name__ == "__main__":
-    # ... 原有主程序代码保持不变 ...
+    import sys
+    sys.path.insert(0, str(BASE_DIR))
+    print("构建 LangGraph 工作流...")
+    app, agents = build_graph()
+    print(f"LLM 可用: {agents['llm'].available}, 模型: {agents['llm'].model}")
+
+    stream = BASE_DIR / "simulator" / "event_stream.jsonl"
+    if stream.exists():
+        with open(stream, "r", encoding="utf-8") as f:
+            events = [json.loads(line) for line in f if line.strip()]
+        print(f"共 {len(events)} 个事件，演示前 3 个: \n" + "=" * 60)
+        for ev in events[:3]:
+            res = run_one(ev, app)
+            print(f"\n事件 {ev['event_id']} ({ev['anomaly_type']}):")
+            print(f"  研判: {res['screening_result']}")
+            if res.get("diagnosis"):
+                print(f"  诊断: {res['diagnosis']['conclusion']} "
+                      f"(置信度 {res['diagnosis'].get('confidence')})")
+            if res.get("work_order"):
+                wo = res["work_order"]
+                print(f"  工单: {wo['work_order_id']} 风险={wo['risk_level']} "
+                      f"动作={wo['action']} 状态={wo['status']}")
+            if res.get("knowledge_entry"):
+                print(f"  知识: {res['knowledge_entry']['knowledge_id']}")
+    else:
+        print("未找到 event_stream.jsonl，请先运行 Step 2。")

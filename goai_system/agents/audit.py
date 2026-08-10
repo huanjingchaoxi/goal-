@@ -12,11 +12,13 @@ Step 7: 审计日志 + 哈希防篡改
 import hashlib
 import json
 import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 DEFAULT_MODEL = "deepseek-chat"
+_AUDIT_LOCK = threading.Lock()
 
 
 def sha16(data):
@@ -41,9 +43,10 @@ def build_log_entry(node, input_data, output_data,
 
 def append_audit(entry):
     """追加审计日志到 logs/audit.jsonl。"""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(LOG_DIR / "audit.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    with _AUDIT_LOCK:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LOG_DIR / "audit.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return entry
 
 

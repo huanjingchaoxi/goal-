@@ -11,6 +11,30 @@ import json
 from datetime import datetime, timezone
 
 
+# 维修方案 Agent 的 8 种规则引擎故障类型
+KNOWN_FAULT_TYPES = {
+    "刀具磨损", "刀具崩刃", "刀具涂层脱落", "积屑瘤",
+    "热裂纹", "缺口磨损", "塑性变形", "月牙洼磨损",
+}
+
+# 事件 anomaly_type -> 故障类型 映射（含模拟器新增的中文细分故障名）
+ANOMALY_TO_FAULT = {
+    "vibration_drift": "刀具磨损",
+    "ae_impact": "刀具崩刃",
+    "force_trend_anomaly": "积屑瘤",
+    "wear_approaching_limit": "刀具磨损",
+    "false_positive_injected": "未知故障",
+    "刀具磨损": "刀具磨损",
+    "刀具崩刃": "刀具崩刃",
+    "刀具涂层脱落": "刀具涂层脱落",
+    "积屑瘤": "积屑瘤",
+    "热裂纹": "热裂纹",
+    "缺口磨损": "缺口磨损",
+    "塑性变形": "塑性变形",
+    "月牙洼磨损": "月牙洼磨损",
+}
+
+
 class FaultDiagnosisAgent:
     def __init__(self, llm_client, knowledge_base):
         self.llm = llm_client
@@ -40,6 +64,8 @@ class FaultDiagnosisAgent:
 
     def diagnose(self, event):
         retrieved = self._retrieve(event)
+        atype = event.get("anomaly_type", "unknown")
+        fault_type = ANOMALY_TO_FAULT.get(atype, "未知故障")
         context = "\n".join(f"[{r['source']}] {r['text']}" for r in retrieved)
 
         prompt = (
@@ -50,23 +76,29 @@ class FaultDiagnosisAgent:
             "1. 结论必须基于检索结果中的标准条款\n"
             "2. 每条证据必须标注来源（source 字段，只能取自上述检索结果的 [source] 标记）\n"
             "3. 如果检索结果不足以支撑结论，明确说明'证据不足'\n"
-            "4. 输出严格 JSON 格式，不要输出其他内容\n\n"
+            "4. fault_type 只能取以下值之一：刀具磨损、刀具崩刃、刀具涂层脱落、"
+            "积屑瘤、热裂纹、缺口磨损、塑性变形、月牙洼磨损、未知故障\n"
+            "5. 输出严格 JSON 格式，不要输出其他内容\n\n"
             '输出格式:\n'
-            '{"conclusion": "诊断结论", "confidence": 0.0-1.0, '
+            '{"conclusion": "诊断结论", "fault_type": "刀具磨损/刀具崩刃/刀具涂层脱落/'
+            '积屑瘤/热裂纹/缺口磨损/塑性变形/月牙洼磨损/未知故障", "confidence": 0.0-1.0, '
             '"evidence": [{"type": "signal|standard|case", "desc": "...", "source": "..."}], '
             '"recommended_action": "...", "rul_estimate_hours": float}'
         )
         report = self.llm.chat_json(prompt, max_tokens=1000)
         if report and isinstance(report, dict) and report.get("conclusion"):
+            # 规范化 fault_type：缺失或非法时回退到 anomaly_type 映射
+            if report.get("fault_type") not in KNOWN_FAULT_TYPES:
+                report["fault_type"] = fault_type
             report = self._hallucination_guard(report, retrieved)
             report["diagnosis_id"] = f"diag_{event.get('event_id', 'unknown')}"
             report["event_id"] = event.get("event_id")
             report["tool_id"] = event.get("tool_id")
+            report["anomaly_type"] = atype
             report["timestamp"] = datetime.now(timezone.utc).isoformat()
             return report
 
         # ---- 规则兜底（LLM 不可用）----
-        atype = event.get("anomaly_type", "unknown")
         conclusion_map = {
             "vibration_drift": "振动漂移异常，疑为刀具后刀面磨损加剧或主轴动平衡问题",
             "ae_impact": "声发射冲击事件，疑为刃口崩刃或涂层脱落",
@@ -84,6 +116,8 @@ class FaultDiagnosisAgent:
             "diagnosis_id": f"diag_{event.get('event_id', 'unknown')}",
             "event_id": event.get("event_id"),
             "tool_id": event.get("tool_id"),
+            "anomaly_type": atype,
+            "fault_type": fault_type,
             "conclusion": conclusion,
             "confidence": event.get("confidence", 0.7),
             "evidence": evidence,

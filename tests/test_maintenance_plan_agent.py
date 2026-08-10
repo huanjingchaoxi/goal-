@@ -113,18 +113,18 @@ class TestMaintenancePlanAgent:
 
     # ========== 测试特定故障类型的输出 ==========
     def test_specific_fault_types_output(self):
-        """测试特定故障类型返回的步骤包含关键词"""
+        """测试规则引擎中特定故障类型的步骤包含关键词（确定性，不依赖 LLM）"""
         test_cases = [
-            ("刀具磨损", "VB值"),
+            ("刀具磨损", "VB 值"),
             ("刀具崩刃", "停机"),
             ("积屑瘤", "切削速度"),
-            ("热裂纹", "冷却"),
+            ("热裂纹", "切削液"),
             ("月牙洼磨损", "涂层"),
         ]
         
         for fault_type, keyword in test_cases:
             diagnosis = {"fault_type": fault_type}
-            result = self.agent.generate_plan(diagnosis)
+            result = self.agent._generate_by_rules(diagnosis)
             # 合并所有步骤为一个字符串
             steps_text = " ".join(result["steps"])
             assert keyword in steps_text, f"故障类型 '{fault_type}' 的步骤中未包含关键词 '{keyword}'"

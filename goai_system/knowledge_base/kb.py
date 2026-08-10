@@ -13,6 +13,7 @@ import json
 import pickle
 import hashlib
 import sys
+import threading
 from pathlib import Path
 import numpy as np
 
@@ -27,10 +28,13 @@ class KnowledgeBase:
 
     def __init__(self, chunks_path=CHUNKS_PATH, vec_path=VEC_PATH,
                  faiss_path=FAISS_PATH, retriever="auto"):
+        self.chunks_path = chunks_path
         self.chunks = self._load_chunks(chunks_path)
         self.vectorizer = self._load_pickle(vec_path)
         self.faiss_index = None
         self.dim = None
+        self._write_lock = threading.Lock()
+        self._faiss_ok = False
         if self.vectorizer is not None and self.chunks:
             self.matrix = self.vectorizer.transform([c["text"] for c in self.chunks]).tocsr()
             self.dim = self.matrix.shape[1]
@@ -48,6 +52,8 @@ class KnowledgeBase:
                     self._faiss_ok = False
             else:
                 self._faiss_ok = False
+        else:
+            self.matrix = None
 
     @staticmethod
     def _load_chunks(path):
@@ -71,16 +77,18 @@ class KnowledgeBase:
             return pickle.load(f)
 
     def is_ready(self):
-        return self.vectorizer is not None and len(self.chunks) > 0
+        return (self.vectorizer is not None and len(self.chunks) > 0
+                and self.matrix is not None)
 
     def retrieve(self, query, top_k=3):
         """返回 [{text, source, category, score}]，按相关性降序。"""
         if not self.is_ready():
             return []
-        qvec = self.vectorizer.transform([query]).toarray().astype("float32")
+        qvec_sparse = self.vectorizer.transform([query])
 
         if self._faiss_ok and self.faiss_index is not None:
             import faiss
+            qvec = qvec_sparse.toarray().astype("float32")
             faiss.normalize_L2(qvec)
             scores, idxs = self.faiss_index.search(qvec, min(top_k, len(self.chunks)))
             results = []
@@ -92,7 +100,7 @@ class KnowledgeBase:
             return results
 
         # 降级: sklearn 余弦相似度
-        sims = (self.matrix @ qvec.T).toarray().ravel()
+        sims = (self.matrix @ qvec_sparse.T).toarray().ravel()
         top_idx = np.argsort(sims)[::-1][:top_k]
         results = []
         for i in top_idx:
@@ -102,32 +110,51 @@ class KnowledgeBase:
         return results
 
     def add_knowledge(self, text, source="user_feedback", category="case", persist=True):
-        """追加一条知识（知识沉淀 Agent 用），并增量更新矩阵/索引。"""
+        """追加一条知识（知识沉淀 Agent 用），增量更新矩阵/索引，追加式落盘。"""
         chunk = {
             "text": text,
             "source": source,
             "category": category,
             "kid": hashlib.md5(text.encode("utf-8")).hexdigest()[:10],
         }
-        self.chunks.append(chunk)
-        # 重新计算矩阵（chunk 量级小，全量重建可接受）
-        self.matrix = self.vectorizer.transform([c["text"] for c in self.chunks]).tocsr()
-        self.dim = self.matrix.shape[1]
-        if self._faiss_ok:
-            try:
-                import faiss
-                X = self.matrix.toarray().astype("float32")
-                faiss.normalize_L2(X)
-                index = faiss.IndexFlatIP(self.dim)
-                index.add(X)
-                self.faiss_index = index
-                faiss.write_index(index, str(FAISS_PATH))
-            except Exception:
-                pass
-        if persist:
-            with open(CHUNKS_PATH, "w", encoding="utf-8") as f:
-                for c in self.chunks:
-                    f.write(json.dumps(c, ensure_ascii=False) + "\n")
+        with self._write_lock:
+            self.chunks.append(chunk)
+
+            # 增量更新 TF-IDF 矩阵（O(1)，避免每次全量重建）
+            if self.vectorizer is not None:
+                try:
+                    vec = self.vectorizer.transform([text]).tocsr()
+                    if self.matrix is None:
+                        self.matrix = vec
+                    else:
+                        from scipy.sparse import vstack
+                        self.matrix = vstack([self.matrix, vec]).tocsr()
+                    self.dim = self.matrix.shape[1]
+                except Exception as e:
+                    print(f"⚠️ 增量更新检索矩阵失败，回退全量重建: {e}")
+                    try:
+                        self.matrix = self.vectorizer.transform(
+                            [c["text"] for c in self.chunks]).tocsr()
+                        self.dim = self.matrix.shape[1]
+                    except Exception:
+                        pass
+
+                # 增量更新 FAISS 索引（IndexFlatIP 支持追加）
+                if self._faiss_ok and self.faiss_index is not None:
+                    try:
+                        import faiss
+                        X = self.matrix[self.matrix.shape[0] - 1].toarray().astype("float32")
+                        faiss.normalize_L2(X)
+                        self.faiss_index.add(X)
+                    except Exception:
+                        pass
+
+            if persist:
+                try:
+                    with open(self.chunks_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+                except Exception as e:
+                    print(f"⚠️ 知识写入失败: {e}")
         return chunk
 
     def count(self):

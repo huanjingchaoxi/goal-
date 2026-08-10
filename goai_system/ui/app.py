@@ -178,13 +178,11 @@ def main():
                     c1, c2 = st.columns(2)
                     with c1:
                         if st.button("✅ 批准执行", key=f"ap_{event['event_id']}"):
-                            st.session_state[key]["human_approval"] = "approved"
-                            st.session_state[key] = run_one(event, app)
+                            st.session_state[key] = run_one(event, app, human_approval="approved")
                             st.rerun()
                     with c2:
                         if st.button("❌ 驳回", key=f"rj_{event['event_id']}"):
-                            st.session_state[key]["human_approval"] = "rejected"
-                            st.session_state[key] = run_one(event, app)
+                            st.session_state[key] = run_one(event, app, human_approval="rejected")
                             st.rerun()
         
         if result.get("knowledge_entry"):
@@ -200,7 +198,8 @@ def main():
                     if results:
                         st.success(f"找到 {len(results)} 个相关片段")
                         for r in results[:2]:
-                            st.caption(r[:150] + "...")
+                            text = r.get("content") if isinstance(r, dict) else str(r)
+                            st.caption((text[:150] + "...") if len(text) > 150 else text)
                     else:
                         st.warning("未找到相关内容")
                 except Exception as e:
