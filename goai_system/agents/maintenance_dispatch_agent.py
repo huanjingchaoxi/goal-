@@ -6,6 +6,10 @@ Step 4.3: 维修调度 Agent
 """
 from datetime import datetime, timezone
 
+# ===== 临时演示开关：强制所有工单进入人工审批流程 =====
+# 演示结束后删除本开关，或改为 False 恢复自动审批
+FORCE_REQUIRED_APPROVAL = True
+
 
 class MaintenanceDispatchAgent:
     def __init__(self, llm_client=None):
@@ -27,6 +31,10 @@ class MaintenanceDispatchAgent:
         else:
             risk_level, priority = "low", "normal"
             required_approval = False
+
+        # 临时演示：强制开启审批（不改变风险等级/优先级判定）
+        if FORCE_REQUIRED_APPROVAL:
+            required_approval = True
 
         return {
             "work_order_id": f"wo_{diagnosis.get('diagnosis_id', 'diag_unknown')}",
