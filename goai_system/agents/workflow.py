@@ -48,6 +48,7 @@ class AgentState(TypedDict):
     plan_result: Optional[dict]         # 维修方案结果（你的 Agent 输出）
     work_order: Optional[dict]
     human_approval: Optional[str]
+    human_feedback: Optional[dict]
     knowledge_entry: Optional[dict]
     log: list
 
@@ -126,7 +127,8 @@ def build_graph():
         t0 = datetime.now()
         wo = dict(state["work_order"])
         wo["symptom"] = (state.get("diagnosis") or {}).get("conclusion", "待补充")
-        kn = agents["knowledge"].update(wo, human_feedback={"effect": "换刀后恢复正常"})
+        feedback = state.get("human_feedback") or {"effect": "换刀后恢复正常"}
+        kn = agents["knowledge"].update(wo, human_feedback=feedback)
         append_audit(build_log_entry(
             "knowledge", wo, kn,
             latency_ms=(datetime.now() - t0).total_seconds() * 1000))
@@ -187,15 +189,19 @@ def initial_state(event):
         "plan_result": None,      # 补充 plan_result
         "work_order": None,
         "human_approval": None,
+        "human_feedback": None,
         "knowledge_entry": None,
         "log": [],
     }
 
 
-def run_one(event, app=None):
+def run_one(event, app=None, human_approval=None):
     if app is None:
         app, _ = build_graph()
-    return app.invoke(initial_state(event))
+    state = initial_state(event)
+    if human_approval is not None:
+        state["human_approval"] = human_approval
+    return app.invoke(state)
 
 
 def run_batch(events=None, max_events=None):
